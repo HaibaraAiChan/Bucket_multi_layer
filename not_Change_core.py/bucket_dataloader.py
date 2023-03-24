@@ -26,6 +26,7 @@ from multiprocessing import Process, Queue
 from collections import Counter, OrderedDict
 import copy
 from typing import Union, Collection
+from torch_util import torch_is_in_1d
 
 class OrderedCounter(Counter, OrderedDict):
 	'Counter that remembers the order elements are first encountered'
@@ -92,16 +93,7 @@ def generate_one_block(raw_graph, global_srcnid, global_dstnid, global_eids):
 
 
 
-def torch_is_in_1d(query_tensor: torch.LongTensor, test_tensor: torch.LongTensor ) :
-    # normalize input
-	if not isinstance(test_tensor, torch.Tensor):
-		test_tensor = torch.as_tensor(data=list(test_tensor), dtype=torch.long)
 
-	max_id = max(query_tensor.max(), test_tensor.max()) + 1
-	mask = torch.zeros(max_id, dtype=torch.bool)
-	mask[test_tensor] = True
-
-	return mask[query_tensor.view(-1)].view(*query_tensor.shape)
 
 
 
@@ -115,31 +107,32 @@ def check_connections_block(batched_nodes_list, current_layer_block):
 
 
 	induced_src = current_layer_block.srcdata[dgl.NID]
-
+	
 	eids_global = current_layer_block.edata['_ID']
 
 
 	
 	# src_nid_list = induced_src.tolist()
-	print('src_nid_list ', induced_src)
+	# print('src_nid_list ', induced_src)
 	# the order of srcdata in current block is not increased as the original graph. For example,
 	# src_nid_list  [1049, 432, 741, 554, ... 1683, 1857, 1183, ... 1676]
 	# dst_nid_list  [1049, 432, 741, 554, ... 1683]
 	
 	induced_src = induced_src.long()
-	print('batched_nodes_list ', batched_nodes_list)
+	# print('batched_nodes_list ', batched_nodes_list)
 	for step, output_nid in enumerate(batched_nodes_list):
 		
 		# print('global output_nid', output_nid)
 		output_nid = output_nid.long()
 		
-		local_output_nid_long = torch_is_in_1d(induced_src, output_nid).long()
+		
+		local_output_nid_long = torch_is_in_1d(induced_src, output_nid).long() # might change the order of the local nid 
 		local_output_nid = torch.nonzero(local_output_nid_long, as_tuple=True)[0]
 		# print('local_output_nid ', local_output_nid)
-		
+		output_nid = induced_src[local_output_nid] # to make the output nid match with the changed order
 		local_in_edges_tensor = current_layer_block.in_edges(local_output_nid, form='all')
-		# print('local_in_edges_tensor', local_in_edges_tensor)
-
+		# print('local_in_edges_tensor', local_in_edges_tensor) # is based on the changed local nid order
+		
 		# return (𝑈,𝑉,𝐸𝐼𝐷)
 		# get local srcnid and dstnid from subgraph
 		mini_batch_src_local= list(local_in_edges_tensor)[0] # local (𝑈,𝑉,𝐸𝐼𝐷);
@@ -210,31 +203,31 @@ def generate_blocks_for_one_layer_block(raw_graph, layer_block, batches_nid_list
 
 
 
-def gen_batched_output_list(dst_nids, args ):
-	batch_size=0
-	if args.num_batch != 0 :
-		batch_size = ceil(len(dst_nids)/args.num_batch)
-		args.batch_size = batch_size
-	# print('number of batches is ', args.num_batch)
-	# print('batch size is ', batch_size)
-	partition_method = args.selection_method
-	batches_nid_list=[]
-	weights_list=[]
-	if partition_method=='range':
-		indices = [i for i in range(len(dst_nids))]
-		map_output_list = list(numpy.array(dst_nids)[indices])
-		batches_nid_list = [map_output_list[i:i + batch_size] for i in range(0, len(map_output_list), batch_size)]
-		length = len(dst_nids)
-		weights_list = [len(batch_nids)/length  for batch_nids in batches_nid_list]
-	if partition_method=='random':
-		indices = torch.randperm(len(dst_nids))
-		map_output_list = dst_nids.view(-1)[indices].view(dst_nids.size())
-		# map_output_list = list(numpy.array(dst_nids)[indices])
-		batches_nid_list = [map_output_list[i:i + batch_size] for i in range(0, len(map_output_list), batch_size)]
-		length = len(dst_nids)
-		weights_list = [len(batch_nids)/length  for batch_nids in batches_nid_list]
+# def gen_batched_output_list(dst_nids, args ):
+# 	batch_size=0
+# 	if args.num_batch != 0 :
+# 		batch_size = ceil(len(dst_nids)/args.num_batch)
+# 		args.batch_size = batch_size
+# 	# print('number of batches is ', args.num_batch)
+# 	# print('batch size is ', batch_size)
+# 	partition_method = args.selection_method
+# 	batches_nid_list=[]
+# 	weights_list=[]
+# 	if partition_method=='range':
+# 		indices = [i for i in range(len(dst_nids))]
+# 		map_output_list = list(numpy.array(dst_nids)[indices])
+# 		batches_nid_list = [map_output_list[i:i + batch_size] for i in range(0, len(map_output_list), batch_size)]
+# 		length = len(dst_nids)
+# 		weights_list = [len(batch_nids)/length  for batch_nids in batches_nid_list]
+# 	if partition_method=='random':
+# 		indices = torch.randperm(len(dst_nids))
+# 		map_output_list = dst_nids.view(-1)[indices].view(dst_nids.size())
+# 		# map_output_list = list(numpy.array(dst_nids)[indices])
+# 		batches_nid_list = [map_output_list[i:i + batch_size] for i in range(0, len(map_output_list), batch_size)]
+# 		length = len(dst_nids)
+# 		weights_list = [len(batch_nids)/length  for batch_nids in batches_nid_list]
 
-	return batches_nid_list, weights_list
+# 	return batches_nid_list, weights_list
 
 
 def gen_grouped_dst_list(prev_layer_blocks):
@@ -266,19 +259,22 @@ def	generate_dataloader_bucket_block(raw_graph, full_block_dataloader, args):
 	for _,(src_full, dst_full, full_blocks) in enumerate(full_block_dataloader):
 
 		dst_nids = dst_full
+		
 
 		for layer_id, layer_block in enumerate(reversed(full_blocks)):
-
-			block_eidx_global, block_edges_nids_global = get_global_graph_edges_ids_block(raw_graph, layer_block)
-			layer_block.edata['_ID'] = block_eidx_global  # this only do in the first time
-
+			# print('layer_block.edata[dgl.NID]')
+			# print(layer_block.edata['_ID'])
+			# block_eidx_global, block_edges_nids_global = get_global_graph_edges_ids_block(raw_graph, layer_block)
+			# layer_block.edata['_ID'] = block_eidx_global  # this only do in the first time
+			
 			if layer_id == 0:
+
 				bucket_partitioner = Bucket_Partitioner(layer_block, args)
-				batched_output_nid_list,weights_list,batch_list_generation_time, p_len_list \
-				= bucket_partitioner.init_partition()
+				batched_output_nid_list,weights_list,batch_list_generation_time, p_len_list = bucket_partitioner.init_partition()
 
 				num_batch=len(batched_output_nid_list)
 				print(' the number of batches: ', num_batch)
+				# print('the batched output global nids ', batched_output_nid_list)
 
 
 				#----------------------------------------------------------
