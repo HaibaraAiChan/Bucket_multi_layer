@@ -2,7 +2,7 @@ import sys
 sys.path.insert(0,'..')
 sys.path.insert(0,'..')
 sys.path.insert(0,'../../pytorch/utils/')
-sys.path.insert(0,'../../pytorch/micro_batch_train/')
+sys.path.insert(0,'../../pytorch/bucketing/')
 sys.path.insert(0,'../../pytorch/models/')
 import dgl
 from dgl.data.utils import save_graphs
@@ -255,12 +255,12 @@ def main():
 	# argparser.add_argument('--root', type=str, default='../my_full_graph/')
 	# argparser.add_argument('--dataset', type=str, default='ogbn-arxiv')
 	# argparser.add_argument('--dataset', type=str, default='ogbn-mag')
-	argparser.add_argument('--dataset', type=str, default='ogbn-products')
+	# argparser.add_argument('--dataset', type=str, default='ogbn-products')
 	# argparser.add_argument('--dataset', type=str, default='cora')
-	# argparser.add_argument('--dataset', type=str, default='karate')
+	argparser.add_argument('--dataset', type=str, default='karate')
 	# argparser.add_argument('--dataset', type=str, default='reddit')
-	argparser.add_argument('--aggre', type=str, default='lstm')
-	# argparser.add_argument('--aggre', type=str, default='mean')
+	# argparser.add_argument('--aggre', type=str, default='lstm')
+	argparser.add_argument('--aggre', type=str, default='mean')
 	# argparser.add_argument('--selection-method', type=str, default='range')
 	# argparser.add_argument('--selection-method', type=str, default='random')
 	# argparser.add_argument('--selection-method', type=str, default='metis')
@@ -280,8 +280,8 @@ def main():
 	argparser.add_argument('--num-hidden', type=int, default=256)
 
 	argparser.add_argument('--num-layers', type=int, default=1)
-	# argparser.add_argument('--fan-out', type=str, default='4')
-	argparser.add_argument('--fan-out', type=str, default='10')
+	argparser.add_argument('--fan-out', type=str, default='4')
+	# argparser.add_argument('--fan-out', type=str, default='10')
 
 
 
@@ -354,4 +354,3 @@ def main():
 
 if __name__=='__main__':
 	main()
-
