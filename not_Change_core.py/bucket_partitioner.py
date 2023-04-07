@@ -19,7 +19,7 @@ import pandas as pd
 from collections import Counter
 from math import ceil
 from cpu_mem_usage import get_memory
-from torch_util import torch_is_in_1d
+from my_utils import torch_is_in_1d
 
 def asnumpy(input):
 	return input.cpu().detach().numpy()
