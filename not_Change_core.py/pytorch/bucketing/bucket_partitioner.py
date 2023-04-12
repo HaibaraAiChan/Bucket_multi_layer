@@ -37,6 +37,12 @@ def gather_row(data, row_index):
 def zerocopy_from_numpy(np_array):
 	return torch.as_tensor(np_array)
 
+def my_sort_1d(val):  # add new function here, to replace torch.sort()
+		idx_dict = dict(zip(range(len(val)),val.tolist())) #####
+		sorted_res = dict(sorted(idx_dict.items(), key=lambda item: item[1])) ######
+		sorted_val = torch.tensor(list(sorted_res.values())).to(val.device)  ######
+		idx = torch.tensor(list(sorted_res.keys())).to(val.device) ######
+		return sorted_val, idx
 
 class Bucket_Partitioner:  # ----------------------*** split the output layer block ***---------------------
 	def __init__(self, layer_block, args):
@@ -72,16 +78,20 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 		
 		self.in_degrees = self.layer_block.in_degrees()
 
-	def my_sort_1d(val):  # add new function here, to replace torch.sort()
-		idx_dict = dict(zip(range(len(val)),val.tolist())) #####
-		sorted_res = dict(sorted(idx_dict.items(), key=lambda item: item[1])) ######
-		sorted_val = torch.tensor(list(sorted_res.values())).to(val.device)  ######
-		idx = torch.tensor(list(sorted_res.keys())).to(val.device) ######
-		return sorted_val, idx
+	
+
+
 
 	def _bucketing(self, val):
 		# val : local index degrees 
-		sorted_val, idx = torch.sort(val)
+		# sorted_val, idx = torch.sort(val)
+		print('degrees val')
+		print(val)
+		sorted_val, idx = val.sort(stable=True)
+		print('sorted_val ', sorted_val)
+		print('idx ', idx)
+		# sorted_val, idx = my_sort_1d(val) # keep the nodes in global order
+
 		unique_val = asnumpy(torch.unique(sorted_val))
 		bkt_idx = []
 		for v in unique_val:
@@ -93,10 +103,11 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 		return unique_val, bucketor
 
 	def get_in_degree_bucketing(self):
-		num_fanout_degree_split = self.args.num_split_degree
+		
 		degs = self.layer_block.in_degrees()
-		# print('degs', degs)
-		nodes = self.layer_block.dstnodes()
+		print('dst global nid ', self.layer_block.dstdata['_ID'])
+		print('corresponding in degs', degs)
+		nodes = self.layer_block.dstnodes() # local dst nid
 		
 		# degree bucketing
 		unique_degs, bucketor = self._bucketing(degs)
@@ -130,26 +141,32 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 			if self.args.num_batch > 1:
 				fanout_batch_size = ceil(len(fanout_dst_nids)/(self.args.num_batch-1))
 				# args.batch_size = batch_size
+		
+
 			if 'random' in self.selection_method:
 				# print('before  shuffle ', fanout_dst_nids)
 				indices = torch.randperm(len(fanout_dst_nids))
 				map_output_list = fanout_dst_nids.view(-1)[indices].view(fanout_dst_nids.size())
 				# print('after shuffle ', map_output_list)
-
 				batches_nid_list = [map_output_list[i:i + fanout_batch_size] for i in range(0, len(map_output_list), fanout_batch_size)]
-				group_nids_list = bkt_dst_nodes_list[:-1]
-				if len(group_nids_list) == 1 :
-					batches_nid_list.insert(0, group_nids_list[0])
-				else:
-					batches_nid_list.insert(0, torch.cat(group_nids_list))
-				
-				length = len(self.output_nids)
-				self.weights_list = [len(batch_nids)/length  for batch_nids in batches_nid_list]
-				# print('batches_nid_list ', batches_nid_list)
-				# print('weights_list ', self.weights_list)
-				
+			
+    
+			if 'range' in self.selection_method:   
+				batches_nid_list = [map_output_list[i:i + fanout_batch_size] for i in range(0, len(map_output_list), fanout_batch_size)]
+			
+			group_nids_list = bkt_dst_nodes_list[:-1]
+			if len(group_nids_list) == 1 :
+				batches_nid_list.insert(0, group_nids_list[0])
+			else:
+				batches_nid_list.insert(0, torch.cat(group_nids_list))
+			
+			length = len(self.output_nids)
+			self.weights_list = [len(batch_nids)/length  for batch_nids in batches_nid_list]
+			# print('batches_nid_list ', batches_nid_list)
+			# print('weights_list ', self.weights_list)
+			
 
-				self.local_batched_seeds_list = batches_nid_list
+			self.local_batched_seeds_list = batches_nid_list
 		return
 
 
@@ -176,7 +193,7 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 		t2 = time.time()
 
 		self.gen_batches_seeds_list(bkt_dst_nodes_list)
-		print('total k batches seeds list generation spend ', time.time()-t2 )
+		# print('total k batches seeds list generation spend ', time.time()-t2 )
 
 		# self.get_partition_src_len_list()
 
@@ -185,11 +202,6 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 
 
 	def global_to_local(self):
-
-		in_tensor = self.src_nids_tensor
-		idx = torch.arange(0, in_tensor.size()[0])
-		eqidx = nonzero_1d(torch_is_in_1d(sub_in_nids_tensor,self.output_nids ))
-		self.local_output_nids = gather_row(idx, eqidx)
 		
 		self.local=True
 		
@@ -197,23 +209,37 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 
 	
 	def local_to_global(self):
-		
-		for local_in_nids in self.local_batched_seeds_list:
-			self.global_batched_seeds_list.append(gather_row(self.src_nids_tensor, local_in_nids))
-		
-		self.local=False
+		# print('-'*40)
+		print('src global ', self.src_nids_tensor)
 
+		for local_in_nids in self.local_batched_seeds_list:
+			print('local nid ', local_in_nids)
+			
+			# if 'range' in self.selection_method:
+			# 	self.global_batched_seeds_list.append(gather_row(self.src_nids_tensor, local_in_nids))
+			if 'random' in self.selection_method:
+				eqidx = nonzero_1d(torch_is_in_1d(self.src_nids_tensor, local_in_nids))
+				print('eqidx ', eqidx)
+				after_sort = gather_row(self.src_nids_tensor, eqidx)
+					
+				print('after sort based on full batch order ', after_sort)
+				self.global_batched_seeds_list.append(after_sort)
+				
+			print()
+
+		self.local=False
+		# print('-'*40)
 		return
 
 
 	def init_partition(self):
 		ts = time.time()
 		# global to local is not used during bucket spliting
-		# self.global_to_local() # global to local            self.local_batched_seeds_list 
+		self.global_to_local() # global to local           
 		
 		t2=time.time()
 		# Then, the graph_parition is run in block to graph local nids,it has no relationship with raw graph
-		self.buckets_partition()
+		self.buckets_partition()  # generate  self.local_batched_seeds_list 
 
 		# after that, we transfer the nids of batched output nodes from local to global.
 		self.local_to_global() # local to global         self.global_batched_seeds_list
