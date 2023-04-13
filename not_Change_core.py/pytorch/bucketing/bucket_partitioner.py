@@ -95,8 +95,13 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 		unique_val = asnumpy(torch.unique(sorted_val))
 		bkt_idx = []
 		for v in unique_val:
-			eqidx = nonzero_1d(equal(sorted_val, v))
-			bkt_idx.append(gather_row(idx, eqidx))
+			bool_idx = (sorted_val == v)
+			eqidx = torch.nonzero(bool_idx, as_tuple=False).squeeze().view(-1)
+			# eqidx = nonzero_1d(equal(sorted_val, v))
+			# bkt_idx.append(gather_row(idx, eqidx))
+			local_nids = torch.index_select(idx, 0, eqidx.long())
+			bkt_idx.append(local_nids)
+			
 		def bucketor(data):
 			bkts = [gather_row(data, idx) for idx in bkt_idx]
 			return bkts
@@ -132,7 +137,16 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 	def gen_batches_seeds_list(self, bkt_dst_nodes_list):
 
 		if "bucketing" in self.selection_method :
-			fanout_dst_nids = bkt_dst_nodes_list[-1]
+			total_len = len(bkt_dst_nodes_list)
+			tensor_lengths = [t.numel() for t in bkt_dst_nodes_list]
+
+			if tensor_lengths[-1] > max(tensor_lengths[:-1]):
+				fanout_dst_nids = bkt_dst_nodes_list[-1]
+				group_nids_list = bkt_dst_nodes_list[:-1]
+			else:
+				fanout_dst_nids = torch.cat(bkt_dst_nodes_list[int(total_len/2):])
+				group_nids_list = bkt_dst_nodes_list[:int(total_len/2)]
+			
 			if self.args.num_batch <= 1:
 				print('no need to split fanout degree, full batch train ')
 				self.local_batched_seeds_list = bkt_dst_nodes_list
@@ -144,26 +158,28 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 		
 
 			if 'random' in self.selection_method:
-				# print('before  shuffle ', fanout_dst_nids)
+				print('before  shuffle ', fanout_dst_nids)
 				indices = torch.randperm(len(fanout_dst_nids))
 				map_output_list = fanout_dst_nids.view(-1)[indices].view(fanout_dst_nids.size())
-				# print('after shuffle ', map_output_list)
+				print('after shuffle ', map_output_list)
 				batches_nid_list = [map_output_list[i:i + fanout_batch_size] for i in range(0, len(map_output_list), fanout_batch_size)]
 			
     
 			if 'range' in self.selection_method:   
 				batches_nid_list = [map_output_list[i:i + fanout_batch_size] for i in range(0, len(map_output_list), fanout_batch_size)]
 			
-			group_nids_list = bkt_dst_nodes_list[:-1]
+			
 			if len(group_nids_list) == 1 :
 				batches_nid_list.insert(0, group_nids_list[0])
 			else:
-				batches_nid_list.insert(0, torch.cat(group_nids_list))
+				group_tensor = torch.cat(group_nids_list)
+				group_tensor_increase, _ = torch.sort(group_tensor)
+				batches_nid_list.insert(0, group_tensor_increase)
 			
 			length = len(self.output_nids)
 			self.weights_list = [len(batch_nids)/length  for batch_nids in batches_nid_list]
-			# print('batches_nid_list ', batches_nid_list)
-			# print('weights_list ', self.weights_list)
+			print('batches_nid_list ', batches_nid_list)
+			print('weights_list ', self.weights_list)
 			
 
 			self.local_batched_seeds_list = batches_nid_list
@@ -203,6 +219,16 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 
 	def global_to_local(self):
 		
+		sub_in_nids = self.src_nids_list
+		print('src global')
+		print(sub_in_nids)#----------------
+		# global_nid_2_local = {sub_in_nids[i]: i for i in range(0, len(sub_in_nids))}
+		global_nid_2_local = dict(zip(sub_in_nids,range(len(sub_in_nids))))
+		self.local_output_nids = list(map(global_nid_2_local.get, self.output_nids.tolist()))
+		print('dst local')
+		print(self.local_output_nids)#----------------
+		# self.local_src_nids = list(map(global_nid_2_local.get, self.src_nids_list))
+		
 		self.local=True
 		
 		return
@@ -212,14 +238,17 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 		# print('-'*40)
 		print('src global ', self.src_nids_tensor)
 
-		for local_in_nids in self.local_batched_seeds_list:
-			print('local nid ', local_in_nids)
+		for local_seed_nids in self.local_batched_seeds_list:
+			print('local nid ', local_seed_nids)
 			
 			# if 'range' in self.selection_method:
-			# 	self.global_batched_seeds_list.append(gather_row(self.src_nids_tensor, local_in_nids))
+			# 	self.global_batched_seeds_list.append(gather_row(self.src_nids_tensor, local_seed_nids))
 			if 'random' in self.selection_method:
-				eqidx = nonzero_1d(torch_is_in_1d(self.src_nids_tensor, local_in_nids))
+				local_all = torch.tensor(list(range(len(self.src_nids_tensor))))
+				
+				eqidx = nonzero_1d(torch_is_in_1d(local_all, local_seed_nids))
 				print('eqidx ', eqidx)
+				
 				after_sort = gather_row(self.src_nids_tensor, eqidx)
 					
 				print('after sort based on full batch order ', after_sort)
@@ -234,7 +263,7 @@ class Bucket_Partitioner:  # ----------------------*** split the output layer bl
 
 	def init_partition(self):
 		ts = time.time()
-		# global to local is not used during bucket spliting
+		
 		self.global_to_local() # global to local           
 		
 		t2=time.time()
