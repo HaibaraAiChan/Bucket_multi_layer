@@ -23,7 +23,7 @@ import argparse
 import tqdm
 
 import random
-from graphsage_model import GraphSAGE
+from graphsage_model_wo_mem import GraphSAGE
 import dgl.function as fn
 from load_graph import load_reddit, inductive_split, load_ogb, load_cora, load_karate, prepare_data, load_pubmed
 
@@ -32,15 +32,13 @@ from memory_usage import see_memory_usage, nvidia_smi_usage
 import tracemalloc
 from cpu_mem_usage import get_memory
 from statistics import mean
-# from draw_graph import gen_pyvis_graph_local,gen_pyvis_graph_global,draw_dataloader_blocks_pyvis
-# from draw_graph import draw_dataloader_blocks_pyvis_total
+
 from my_utils import parse_results
-# from utils import draw_graph_global
-# from draw_nx import draw_nx_graph
+
 
 import pickle
 from utils import Logger
-import os
+import os 
 import numpy
 
 
@@ -117,8 +115,10 @@ def load_block_subtensor(nfeat, labels, blocks, device,args):
 	# if args.GPUmem:
 	# 	see_memory_usage("----------------------------------------after batch input features to device")
 	batch_labels = labels[blocks[-1].dstdata[dgl.NID]].to(device)
-	# print('seeds global nids ', blocks[-1].dstdata[dgl.NID])
-	# print('seeds labels : ',batch_labels)
+	print('input global nids ', blocks[0].srcdata[dgl.NID])
+	print('input features: ', batch_inputs)
+	print('seeds global nids ', blocks[-1].dstdata[dgl.NID])
+	print('seeds labels : ',batch_labels)
 	# if args.GPUmem:
 	# 	see_memory_usage("----------------------------------------after  batch labels to device")
 	return batch_inputs, batch_labels
@@ -157,17 +157,6 @@ def run(args, device, data):
 
 
 	args.num_workers = 0
-	full_batch_dataloader = dgl.dataloading.NodeDataLoader(
-		g,
-		train_nid,
-		sampler,
-		# device='cpu',
-		batch_size=full_batch_size,
-		shuffle=True,
-		drop_last=False,
-		num_workers=args.num_workers)
-	# if args.GPUmem:
-	# 	see_memory_usage("----------------------------------------before model to device ")
 
 
 	model = GraphSAGE(
@@ -178,32 +167,62 @@ def run(args, device, data):
 					args.num_layers,
 					F.relu,
 					args.dropout).to(device)
-	model = model.to(device)
-	loss_fcn = nn.CrossEntropyLoss()
-	
-	logger = Logger(args.num_runs, args)
 
+	loss_fcn = nn.CrossEntropyLoss()
+
+	# if args.GPUmem:
+	# 			see_memory_usage("----------------------------------------after model to device")
+	logger = Logger(args.num_runs, args)
 	for run in range(args.num_runs):
 		model.reset_parameters()
-		optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
-		# optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+		# optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+		optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 		for epoch in range(args.num_epochs):
+			model.train()
 
+			loss_sum=0
+			# start of data preprocessing part---s---------s--------s-------------s--------s------------s--------s----
 			if args.load_full_batch:
 				full_batch_dataloader=[]
-				file_name=r'./../../dataset/fan_out_'+args.fan_out+'/'+args.dataset+'_'+str(epoch)+'_items.pickle'
+				file_name=r'/home/cc/Betty_baseline/dataset/fan_out_'+args.fan_out+'/'+args.dataset+'_'+str(epoch)+'_items.pickle'
 				with open(file_name, 'rb') as handle:
 					item=pickle.load(handle)
 					full_batch_dataloader.append(item)
-			if args.num_batch == 1:
+
+			if args.num_batch > 1:
+				b_block_dataloader, weights_list, time_collection = generate_dataloader_bucket_block(g, full_batch_dataloader, args)
+
+
+				for step, (input_nodes, seeds, blocks) in enumerate(b_block_dataloader):
+					batch_inputs, batch_labels = load_block_subtensor(nfeats, labels, blocks, device,args)#------------*
+					blocks = [block.int().to(device) for block in blocks]#------------*
+
+					# Compute loss and prediction
+					batch_pred = model(blocks, batch_inputs)#------------*
+					pseudo_mini_loss = loss_fcn(batch_pred, batch_labels)#------------*
+					pseudo_mini_loss = pseudo_mini_loss*weights_list[step]#------------*
+					pseudo_mini_loss.backward()#------------*
+
+					loss_sum += pseudo_mini_loss#------------*
+
+				optimizer.step()
+				optimizer.zero_grad()
+
+				print('----------------------------------------------------------pseudo_mini_loss sum ' + str(loss_sum.tolist()))
+
+			elif args.num_batch == 1:
+				# print('orignal labels: ', labels)
 				for step, (input_nodes, seeds, blocks) in enumerate(full_batch_dataloader):
 					# print()
 					# print('full batch src global ', input_nodes)
-					# print('full batch dst global ', seeds)
+					print('full batch dst global ', seeds)
 					# print('full batch eid global ', blocks[-1].edata['_ID'])
 					batch_inputs, batch_labels = load_block_subtensor(nfeats, labels, blocks, device,args)#------------*
-					# print('batch_labels ')
+					print('batch_labels ')
+					print(batch_labels)
+					print('blocks')
+					# print(blocks[0].edata['_ID'])
+					print(blocks[-1].edata['_ID'])
 					blocks = [block.int().to(device) for block in blocks]
 					batch_pred = model(blocks, batch_inputs)
 					loss = loss_fcn(batch_pred, batch_labels)
@@ -213,33 +232,7 @@ def run(args, device, data):
 					optimizer.step()
 					optimizer.zero_grad()
 					print()
-				return 
-    
-			b_block_dataloader, weights_list, time_collection = generate_dataloader_bucket_block(g, full_batch_dataloader, args)
-			# pseudo_mini_loss = torch.tensor([], dtype=torch.long)
-			
-			sum_loss =[]
-			for step, (input_nodes, seeds, blocks) in enumerate(b_block_dataloader):
-				# print()
-				# print('src global ', input_nodes)
-				# print('dst global ', seeds)
-				# print('eid global ', blocks[-1].edata['_ID'])
-				batch_inputs, batch_labels = load_block_subtensor(nfeats, labels, blocks, device,args)#------------*
-				blocks = [block.int().to(device) for block in blocks]#------------*
-				batch_pred = model(blocks, batch_inputs)#------------*
-				pseudo_mini_loss = loss_fcn(batch_pred, batch_labels)#------------*
-				print('step '+ str(step) + ' ------ loss ' + str(pseudo_mini_loss.item()) + ' weight: '+str(weights_list[step]))
-				pseudo_mini_loss = pseudo_mini_loss * weights_list[step]#------------*
-				pseudo_mini_loss.backward()#------------*
-				sum_loss.append(pseudo_mini_loss.item())
-				print()
-				
-			print('------accumulated loss is ', sum(sum_loss))
-
-			optimizer.step()
-			optimizer.zero_grad()
-			print()
-
+					
 
 def main():
 	# get_memory("-----------------------------------------main_start***************************")
@@ -253,50 +246,61 @@ def main():
 	argparser.add_argument('--GPUmem', type=bool, default=True)
 	argparser.add_argument('--load-full-batch', type=bool, default=True)
 	# argparser.add_argument('--root', type=str, default='../my_full_graph/')
-	# argparser.add_argument('--dataset', type=str, default='ogbn-arxiv')
+	argparser.add_argument('--dataset', type=str, default='ogbn-arxiv')
 	# argparser.add_argument('--dataset', type=str, default='ogbn-mag')
 	# argparser.add_argument('--dataset', type=str, default='ogbn-products')
 	# argparser.add_argument('--dataset', type=str, default='cora')
-	argparser.add_argument('--dataset', type=str, default='karate')
+	# argparser.add_argument('--dataset', type=str, default='karate')
 	# argparser.add_argument('--dataset', type=str, default='reddit')
-	# argparser.add_argument('--aggre', type=str, default='lstm')
-	argparser.add_argument('--aggre', type=str, default='mean')
+	argparser.add_argument('--aggre', type=str, default='lstm')
+	# argparser.add_argument('--aggre', type=str, default='mean')
 	# argparser.add_argument('--selection-method', type=str, default='range')
 	# argparser.add_argument('--selection-method', type=str, default='random')
 	# argparser.add_argument('--selection-method', type=str, default='metis')
 	# argparser.add_argument('--selection-method', type=str, default='REG')
 	argparser.add_argument('--selection-method', type=str, default='random_bucketing')
-	argparser.add_argument('--num-split-degree', type=int, default=1)
-	argparser.add_argument('--num-batch', type=int, default= 2)
-	
-	argparser.add_argument('--re-partition-method', type=str, default='REG')
+
+	argparser.add_argument('--num-batch', type=int, default=1)
+
+	# argparser.add_argument('--re-partition-method', type=str, default='REG')
 	# argparser.add_argument('--re-partition-method', type=str, default='random')
-	argparser.add_argument('--num-re-partition', type=int, default=0)
+	# argparser.add_argument('--num-re-partition', type=int, default=0)
 
 	# argparser.add_argument('--balanced_init_ratio', type=float, default=0.2)
 	argparser.add_argument('--num-runs', type=int, default=1)
 	argparser.add_argument('--num-epochs', type=int, default=10)
-	
-	argparser.add_argument('--num-hidden', type=int, default=256)
 
-	argparser.add_argument('--num-layers', type=int, default=1)
-	argparser.add_argument('--fan-out', type=str, default='4')
+	argparser.add_argument('--num-hidden', type=int, default=128)
+
+	# argparser.add_argument('--num-layers', type=int, default=1)
 	# argparser.add_argument('--fan-out', type=str, default='10')
 
+	argparser.add_argument('--num-layers', type=int, default=2)
+	argparser.add_argument('--fan-out', type=str, default='10,25')
+	
+	# argparser.add_argument('--num-layers', type=int, default=3)
+	# argparser.add_argument('--fan-out', type=str, default='10,25,30')
+
+
+
+	# argparser.add_argument('--num-layers', type=int, default=1)
+	# argparser.add_argument('--fan-out', type=str, default='4')
+	# argparser.add_argument('--num-layers', type=int, default=2)
+	# argparser.add_argument('--fan-out', type=str, default='2,4')
 
 
 	argparser.add_argument('--log-indent', type=float, default=0)
 #--------------------------------------------------------------------------------------
 
 
-	argparser.add_argument('--lr', type=float, default=1e-3)
+	argparser.add_argument('--lr', type=float, default=1e-2)
 	argparser.add_argument('--dropout', type=float, default=0.5)
 	argparser.add_argument("--weight-decay", type=float, default=5e-4,
 						help="Weight for L2 loss")
-	argparser.add_argument("--eval", action='store_true',
+	argparser.add_argument("--eval", action='store_true', 
 						help='If not set, we will only do the training part.')
 
-	argparser.add_argument('--num-workers', type=int, default=0,
+	argparser.add_argument('--num-workers', type=int, default=4,
 		help="Number of sampling processes. Use 0 for no extra process.")
 	
 
